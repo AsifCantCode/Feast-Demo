@@ -19,35 +19,41 @@ In production Machine Learning systems, feature stores address two core challeng
 
 ## Architecture
 
-```text
-                    UPSTREAM DATA SOURCES
-       [ Raw Dataset (data/diamonds.csv) ]
-                        │
-         ┌──────────────┼──────────────┐
-         ▼              ▼              ▼
- [ Physical DB ]  [ Quality DB ]  [ Sales DB ]
- (carat, x, y, z) (cut, color)   (price, timestamp)
-         │              │              │
-         └──────────────┼──────────────┘
-                        │
-                        ▼
-            [ FEAST FEATURE STORE ]
-            - Registry (data/registry.db)
-            - Definitions (feature_repo/definitions.py)
-                        │
-         ┌──────────────┴──────────────┐
-         ▼ (Offline Pipeline)          ▼ (Online Pipeline)
- [ Point-in-Time Join ]        [ Online Store Materialize ]
- (get_historical_features)     (SQLite / Redis Online Store)
-         │                             │
-         ▼                             │
-[ training_set.parquet ]               │
-         │                             │ (5ms Key-Value Lookup)
-         ▼                             ▼
- [ train_model.py ] ──> [ model.joblib ] ──> [ Live Inference API ]
-                                                     ▲
-                                                     │ (diamond_id: 101)
-                                             [ Client / Frontend ]
+```mermaid
+flowchart TD
+    subgraph Data Layer
+        RAW["Raw Dataset (data/diamonds.csv)"]
+        P["Physical DB (Parquet)"]
+        Q["Quality DB (Parquet)"]
+        L["Labels (Parquet)"]
+        RAW -->|scripts/prepare_diamond_features.py| P
+        RAW -->|scripts/prepare_diamond_features.py| Q
+        RAW -->|scripts/prepare_diamond_features.py| L
+    end
+
+    subgraph Feast Feature Store
+        R["Registry (data/registry.db)"]
+        DEF["Feature Definitions (feature_repo/definitions.py)"]
+        DEF -->|feast apply| R
+    end
+
+    subgraph Offline Training Pipeline
+        L -->|Point-in-Time Join| HIST["get_historical_features()"]
+        P --> HIST
+        Q --> HIST
+        HIST --> TRAIN_DF["training_set.parquet"]
+        TRAIN_DF --> MODEL["train_model.py (RandomForest)"]
+        MODEL --> ARTIFACT["model.joblib"]
+    end
+
+    subgraph Online Serving Pipeline
+        P -->|feast materialize| ONLINE["Online Store (SQLite/Redis)"]
+        Q -->|feast materialize| ONLINE
+        REQ["Incoming API Request (IDs: [101, 202, ...])"] --> GET_ONLINE["get_online_features()"]
+        ONLINE --> GET_ONLINE
+        GET_ONLINE --> PREDICT["model.predict()"]
+        ARTIFACT --> PREDICT
+    end
 ```
 
 ---
