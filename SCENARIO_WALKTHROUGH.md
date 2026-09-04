@@ -11,7 +11,7 @@ This document walks through a real-world production scenario illustrating why mo
 
 To maintain market trust and maximize liquidity, the platform requires an **Automated Diamond Price Appraisal Service**:
 * When a user browses diamonds or an API client queries prices by ID, the system must return an instant price prediction with **sub-50ms latency**.
-* The model must be retrained weekly on historical transaction data without **data leakage** or **feature drift**.
+* The model must be retrained periodically on historical transaction data without **data leakage** or **feature drift**.
 
 ---
 
@@ -19,19 +19,18 @@ To maintain market trust and maximize liquidity, the platform requires an **Auto
 
 Before introducing Feast, the engineering team faced three major architectural bottlenecks:
 
-```mermaid
-flowchart TD
-    subgraph Without Feast
-        A1["Team 1: Physical Lab DB"] -->|Custom SQL| DS1["Data Scientist 1: Training Script"]
-        A2["Team 2: Gemology Lab DB"] -->|Ad-hoc Pandas Merge| DS1
-        A3["Team 3: Transactions DB"] -->|Manual Joins (Data Leakage Risk)| DS1
-        
-        DS1 -->|Trained Model| PROD["Production API"]
-        
-        A1 -->|Live DB Queries (Slow 2-3s Latency)| PROD
-        A2 -->|Live DB Queries| PROD
-        PROD -->|Training-Serving Skew| ERR["Price Prediction Errors & Timeouts"]
-    end
+```text
+[ Team 1: Physical DB ] ──(Custom SQL)──────────┐
+[ Team 2: Gemology DB ] ──(Ad-hoc Pandas Merge)─┼──> [ Data Scientist: Model Training ]
+[ Team 3: Sales DB    ] ──(Accidental Leakage)──┘               │
+                                                                ▼
+                                                       [ Production API ]
+                                                                ▲
+[ Team 1: Physical DB ] ──(Slow 2-3s SQL Queries on Click)──────┤
+[ Team 2: Gemology DB ] ──(Slow 2-3s SQL Queries on Click)──────┘
+                                                                │
+                                                                ▼
+                                              [ Timeouts & Prediction Errors ]
 ```
 
 ### Problem 1: Data Silos & Duplicate Engineering
@@ -54,38 +53,32 @@ During live inference, querying transactional SQL databases across multiple tabl
 
 With Feast, features are treated as **version-controlled software assets**. The same feature definitions power both point-in-time historical training (offline) and sub-millisecond real-time serving (online).
 
-```mermaid
-flowchart TD
-    subgraph Upstream Ingestion
-        P["Laser Lab (physical_features.parquet)"]
-        Q["Gemology Lab (quality_features.parquet)"]
-        L["Sales DB (labels.parquet)"]
-    end
-
-    subgraph Feast Feature Store
-        REG["Central Metadata Registry (registry.db)"]
-        DEF["Feature Definitions as Code (definitions.py)"]
-        DEF -->|feast apply| REG
-    end
-
-    subgraph Offline Path: Training (Point-in-Time Correct)
-        L -->|Time-Travel Joins| FEAST_HIST["store.get_historical_features()"]
-        P --> FEAST_HIST
-        Q --> FEAST_HIST
-        FEAST_HIST --> TRAIN_DATA["training_set.parquet"]
-        TRAIN_DATA --> TRAIN_SCRIPT["train_model.py"]
-        TRAIN_SCRIPT --> MODEL["model.joblib"]
-    end
-
-    subgraph Online Path: Low-Latency Inference
-        P -->|feast materialize| HOT_CACHE["SQLite / Redis Online Store"]
-        Q -->|feast materialize| HOT_CACHE
-        
-        CLIENT["User / API Request: diamond_id = 101"] --> API["FastAPI / Inference Service"]
-        HOT_CACHE -->|5ms Key-Value Lookup| API
-        MODEL --> API
-        API --> RESP["Predicted Price: $2,945"]
-    end
+```text
+                    UPSTREAM DATA INGESTION
+    [ Laser Lab ]         [ Gemology Lab ]         [ Sales DB ]
+ (physical.parquet)       (quality.parquet)      (labels.parquet)
+         │                       │                      │
+         └───────────────┬───────┴──────────────────────┘
+                         │
+                         ▼
+             [ FEAST FEATURE STORE ]
+             - Registry (registry.db)
+             - Definitions (definitions.py)
+                         │
+         ┌───────────────┴───────────────┐
+         │                               │
+         ▼ (Offline Path)                ▼ (Online Path: feast materialize)
+ [ Point-in-Time Join ]          [ Low-Latency Online Store ]
+ (get_historical_features)       (SQLite / Redis Hot Cache)
+         │                               │
+         ▼                               │
+[ training_set.parquet ]                 │ (5ms Key-Value Lookup)
+         │                               │
+         ▼                               ▼
+ [ train_model.py ] ──> [ model.joblib ] ──> [ FastAPI Inference Service ]
+                                                      ▲
+                                                      │ (Request: diamond_id = 101)
+                                              [ User / Client App ]
 ```
 
 ---
@@ -185,44 +178,57 @@ python3 scripts/serve_online.py
 
 ---
 
-## 5. Deep Dive: Why Do We Send IDs? (How Feature Lookup Works)
+## 5. Frequently Asked Questions (Core Concepts Clarified)
 
-A common question is: **Why does the client send only `diamond_id` (e.g., `101, 202`) instead of the full feature values? How does this capture the latest trends and changes?**
+### Q1: "Why do we need to train a model if Feast already stores features? Why can't we just fetch the price?"
+* **Features vs. Target (Price):**
+  Feast stores **input features** (`carat`, `cut`, `clarity`, `depth`, `table`, etc.). Feast does **NOT** store the price of newly listed, unsold diamonds.
+* **Why an ML Model is Necessary:**
+  When a dealer brings 500 brand new diamonds to the marketplace, **nobody knows what fair price they will sell for**. 
+  If the price was already fixed in a database, you would just do `SELECT price FROM diamonds WHERE id = 101` and would not need Machine Learning. 
+  The ML model uses the physical and quality features retrieved by Feast to **estimate / predict** fair market valuation ($ price).
 
-### 1. Separation of Concerns (Thin Clients)
-In real-world applications (web apps, mobile apps, or external APIs), the user's browser or frontend service only knows *which* diamond is being viewed (e.g., `diamond_id: 101`). 
-The client:
-- Does not know raw physical dimensions (`x`, `y`, `z`, `table`, `depth`).
-- Does not have direct database access to gemological certification records.
-- Should not pass 20+ feature columns over HTTP, which would increase payload size, latency, and security risks.
+---
 
-### 2. Fetching the Most Recent State (Handling Fluctuations & Trend Updates)
-Features for an entity are not static:
-- A diamond might be **re-cut or polished** (updating its physical measurements `carat`, `table`, `x`, `y`, `z`).
-- A diamond might receive a **re-certified optical grade** (updating `cut`, `color`, `clarity`).
-- In extended setups, entities often have **rolling trend features** (e.g., `avg_market_price_7d`, `inventory_days_on_market`, `demand_surge_index`).
+### Q2: "How do we input new data into the system, and how does Feast handle it?"
+There are two types of new data entering a production ML system:
 
-**How Feast Handles This:**
-1. Upstream batch or stream jobs update the source tables whenever changes occur.
-2. `feast materialize` runs periodically (e.g., hourly, daily, or via streaming).
-3. The online store overwrites the record for `diamond_id: 101` with its **freshest, most up-to-date snapshot**.
-4. When `store.get_online_features(entity_rows=[{"diamond_id": 101}])` is called, Feast instantly returns the **most recent feature values and latest trends**, without recalculating anything on the fly.
+#### 1. New Diamonds to be Appraised (Inference Pipeline)
+When 1,000 new diamonds arrive at the warehouse:
+1. Upstream scanners write their physical and quality features into the data source files (`physical_features.parquet` and `quality_features.parquet`).
+2. Run `feast materialize` (or Feast streaming/push sources in production).
+3. The new diamond IDs (e.g., `diamond_id: 60001`) and their feature snapshots are immediately inserted into the Online Store (SQLite/Redis).
+4. Clients can now query prices for these new diamonds instantly via `store.get_online_features(entity_rows=[{"diamond_id": 60001}])`.
 
-### 3. Summary: ID-Based Retrieval Workflow
+#### 2. New Historical Sales Transactions (Training Pipeline)
+As diamonds are actually bought and sold over time:
+1. New transaction records (e.g., `diamond_id`, `actual_sold_price`, `sale_timestamp`) are appended to `labels.parquet`.
+2. To adapt to macroeconomic changes (inflation, seasonal diamond demand spikes), the team periodically runs:
+   - `python3 scripts/build_training_set.py` (performs time-travel joins on the new historical data)
+   - `python3 scripts/train_model.py` (retrains and saves the new `model.joblib`)
+
+---
+
+### Q3: "Why do we send only IDs during online inference? Does it fetch the latest trends?"
+When the client calls `store.get_online_features(entity_rows=[{"diamond_id": 101}])`, sending only the ID provides two advantages:
+
+1. **Thin Clients & Security:** The client device (browser/mobile app) only knows *which* diamond is on screen (`diamond_id: 101`). It does not need to download or send 20 internal lab columns over the network.
+2. **Latest Snapshot & Trend Freshness:** If a diamond was re-polished yesterday (changing `table` width) or re-graded in the lab (changing `clarity`), `feast materialize` has already updated that record in the online store. Feast always retrieves the **most recent valid feature state** for that ID in single-digit milliseconds.
+
 ```text
 Frontend Client (Sends only diamond_id: 101)
        │
        ▼
 Inference Service
        │
-       ▼ (Key-Value lookup by diamond_id)
+       ▼ (Key-Value lookup by diamond_id in <5ms)
 Feast Online Store (SQLite / Redis)
-       │──> Pulls the latest materialized snapshot of all 9 features
+       │──> Returns freshest snapshot: [carat=0.75, cut=3, color=5, depth=61.5...]
        ▼
 Model Execution: model.predict(latest_features)
        │
        ▼
-Instant Response: $2,945 (returned in <10ms)
+Instant Response: $2,945
 ```
 
 ---
