@@ -1,23 +1,23 @@
-# 💎 Feast Feature Store — End-to-End Demo Workflow
+# Feast Feature Store — End-to-End Workflow Demonstration
 
 [![Feast](https://img.shields.io/badge/Feast-0.40+-blue.svg)](https://feast.dev/)
 [![Python](https://img.shields.io/badge/Python-3.9+-brightgreen.svg)](https://python.org)
 [![Scikit-Learn](https://img.shields.io/badge/ML-Scikit--Learn-orange.svg)](https://scikit-learn.org)
 
-A complete, self-contained educational demonstration of the **Feast Feature Store** workflow for production Machine Learning systems.
+A complete, self-contained demonstration of the **Feast Feature Store** workflow for production Machine Learning systems using tabular data.
 
 ---
 
-## 📖 What is a Feature Store?
+## Overview: Why Use a Feature Store?
 
-In production Machine Learning systems, feature stores solve two fundamental challenges:
+In production Machine Learning systems, feature stores address two core challenges:
 
-1. **Data Leakage & Inconsistency in Offline Training:** In historical time-series datasets, joining features naively on entity IDs leaks future information into past training samples. Feast executes **point-in-time correct joins** (time-travel joins) to ensure every label is joined only with feature values known *at or before* that event's timestamp.
-2. **Training-Serving Skew in Real-Time Inference:** Models frequently fail in production when online feature logic diverges from offline feature engineering. Feast provides a unified feature definition layer, serving pre-materialized features from a low-latency key-value store (SQLite/Redis) at inference time with single-digit millisecond response.
+1. **Data Leakage and Inconsistency in Offline Training:** In historical time-series datasets, joining features naively on entity identifiers can leak future information into past training samples. Feast executes **point-in-time correct joins** (time-travel joins) to ensure every label is joined only with feature values known *at or before* that event's timestamp.
+2. **Training-Serving Skew in Real-Time Inference:** Models frequently degrade in production when online feature engineering logic diverges from offline pipelines. Feast provides a unified feature definition layer, serving pre-materialized features from a low-latency key-value store (SQLite/Redis) at inference time with single-digit millisecond latency.
 
 ---
 
-## 🏛️ System Architecture
+## Architecture
 
 ```mermaid
 flowchart TD
@@ -58,29 +58,30 @@ flowchart TD
 
 ---
 
-## 📂 Project Structure
+## Project Structure
 
 ```text
-MLSD/Feast/
+.
 ├── data/
-│   └── diamonds.csv                  # Source raw diamond dataset
+│   └── diamonds.csv                  # Raw source dataset
 ├── feature_repo/
 │   ├── feature_store.yaml            # Feast configuration (registry & stores)
-│   └── definitions.py                # Entities, Sources & Feature Views as Code
+│   ├── definitions.py                # Entities, sources, and feature views as code
+│   └── data/                         # Runtime generated databases and parquet files
 ├── scripts/
-    ├── prepare_diamond_features.py   # Simulates upstream DBs / data producers
-    ├── build_training_set.py         # Offline feature retrieval (point-in-time joins)
-    ├── train_model.py                # Model training (RandomForest)
-    └── serve_online.py               # Online low-latency feature retrieval & inference
-├── commands.sh                       # Quick bash script of all commands
-├── requirements.txt                  # Minimal project dependencies
-├── .gitignore                        # Ignores venvs and generated DBs/artifacts
-└── README.md                         # Documentation
+│   ├── prepare_diamond_features.py   # Simulates upstream data producers
+│   ├── build_training_set.py         # Offline feature retrieval (point-in-time joins)
+│   ├── train_model.py                # Model training (RandomForestRegressor)
+│   └── serve_online.py               # Online low-latency feature retrieval & inference
+├── commands.sh                       # Sequential shell execution script
+├── requirements.txt                  # Python dependencies
+├── .gitignore                        # Git ignore rules for environments and artifacts
+└── README.md                         # Project documentation
 ```
 
 ---
 
-## 🚀 Quickstart & Demo Walkthrough
+## Quickstart & Demonstration Walkthrough
 
 ### 0. Environment Setup
 
@@ -99,7 +100,7 @@ In enterprise environments, features are generated across multiple independent d
 python3 scripts/prepare_diamond_features.py
 ```
 
-* **What it does:** Splits `data/diamonds.csv` into three distinct parquet tables in `feature_repo/data/`:
+* **Function:** Reads `data/diamonds.csv` and partitions it into three distinct parquet tables in `feature_repo/data/`:
   - `physical_features.parquet` (Team 1: `carat`, `depth`, `table`, `x`, `y`, `z`)
   - `quality_features.parquet` (Team 2: `cut`, `color`, `clarity`)
   - `labels.parquet` (Target / Business: `price` and `event_timestamp`)
@@ -107,15 +108,15 @@ python3 scripts/prepare_diamond_features.py
 ---
 
 ### Step 2: Declare Features as Code & Apply
-Inspect `feature_repo/definitions.py` to see how entities and feature views are defined in pure Python.
+Feature views and entities are defined declaratively in `feature_repo/definitions.py`.
 
-Apply definitions to the central Feast registry:
+Apply these definitions to the central Feast registry:
 
 ```bash
 feast -c feature_repo apply
 ```
 
-* **What it does:**
+* **Function:**
   - Registers the `diamond` entity and two feature views (`diamond_physical` and `diamond_quality`).
   - Initializes metadata in `feature_repo/data/registry.db` and online store tables in `feature_repo/data/online_store.db`.
 
@@ -127,8 +128,8 @@ Launch the interactive web UI to visually inspect entities, feature views, and s
 ```bash
 feast -c feature_repo ui
 ```
-* Open **http://localhost:8888** in your browser.
-* Press `Ctrl + C` in the terminal to stop the UI server.
+* Access the interface at `http://localhost:8888`.
+* Use `Ctrl + C` in the terminal to terminate the UI server.
 
 ---
 
@@ -139,7 +140,7 @@ Retrieve historical features for training while preventing future data leakage:
 python3 scripts/build_training_set.py
 ```
 
-* **Key Code (`scripts/build_training_set.py`):**
+* **Core Implementation (`scripts/build_training_set.py`):**
   ```python
   store = FeatureStore(repo_path="feature_repo")
   training_df = store.get_historical_features(
@@ -151,7 +152,7 @@ python3 scripts/build_training_set.py
       ],
   ).to_df()
   ```
-* **Output:** Saves `feature_repo/data/training_set.parquet`.
+* **Output:** Generates `feature_repo/data/training_set.parquet`.
 
 ---
 
@@ -162,12 +163,12 @@ Train a Random Forest regressor on the point-in-time feature set:
 python3 scripts/train_model.py
 ```
 
-* **Output:** Evaluates Mean Absolute Error (MAE) on test split and saves `feature_repo/data/model.joblib`.
+* **Output:** Evaluates Mean Absolute Error (MAE) on the test split and serializes the trained model to `feature_repo/data/model.joblib`.
 
 ---
 
 ### Step 6: Materialize Features to Online Store
-Sync latest feature values from offline batch storage into the low-latency online key-value store (SQLite):
+Sync the latest feature values from offline batch storage into the low-latency online key-value store (SQLite):
 
 ```bash
 feast -c feature_repo materialize 2024-01-01T00:00:00 $(date -u +"%Y-%m-%dT%H:%M:%S")
@@ -182,14 +183,14 @@ Simulate incoming production prediction requests:
 python3 scripts/serve_online.py
 ```
 
-* **What it does:** The application receives only IDs (e.g. `[101, 202, 303]`). Feast fetches pre-materialized features from the online store in milliseconds and passes them directly to `model.predict()`.
+* **Function:** The application receives only entity IDs (e.g., `[101, 202, 303]`). Feast fetches pre-materialized features from the online store in milliseconds and passes them directly to `model.predict()`.
 
 ---
 
-## 🧹 Reset Demo to Scratch
+## Resetting the Workspace
 
-To clear all generated databases, parquet files, and model artifacts before a live presentation:
+To remove all generated databases, parquet files, and model artifacts before a live presentation:
 
 ```bash
-rm -rf feature_repo/data/*.parquet feature_repo/data/*.db feature_repo/data/*.joblib
+rm -rf feature_repo/data && mkdir -p feature_repo/data
 ```
