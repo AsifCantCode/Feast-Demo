@@ -185,7 +185,49 @@ python3 scripts/serve_online.py
 
 ---
 
-## 5. Summary of Business Impact
+## 5. Deep Dive: Why Do We Send IDs? (How Feature Lookup Works)
+
+A common question is: **Why does the client send only `diamond_id` (e.g., `101, 202`) instead of the full feature values? How does this capture the latest trends and changes?**
+
+### 1. Separation of Concerns (Thin Clients)
+In real-world applications (web apps, mobile apps, or external APIs), the user's browser or frontend service only knows *which* diamond is being viewed (e.g., `diamond_id: 101`). 
+The client:
+- Does not know raw physical dimensions (`x`, `y`, `z`, `table`, `depth`).
+- Does not have direct database access to gemological certification records.
+- Should not pass 20+ feature columns over HTTP, which would increase payload size, latency, and security risks.
+
+### 2. Fetching the Most Recent State (Handling Fluctuations & Trend Updates)
+Features for an entity are not static:
+- A diamond might be **re-cut or polished** (updating its physical measurements `carat`, `table`, `x`, `y`, `z`).
+- A diamond might receive a **re-certified optical grade** (updating `cut`, `color`, `clarity`).
+- In extended setups, entities often have **rolling trend features** (e.g., `avg_market_price_7d`, `inventory_days_on_market`, `demand_surge_index`).
+
+**How Feast Handles This:**
+1. Upstream batch or stream jobs update the source tables whenever changes occur.
+2. `feast materialize` runs periodically (e.g., hourly, daily, or via streaming).
+3. The online store overwrites the record for `diamond_id: 101` with its **freshest, most up-to-date snapshot**.
+4. When `store.get_online_features(entity_rows=[{"diamond_id": 101}])` is called, Feast instantly returns the **most recent feature values and latest trends**, without recalculating anything on the fly.
+
+### 3. Summary: ID-Based Retrieval Workflow
+```text
+Frontend Client (Sends only diamond_id: 101)
+       │
+       ▼
+Inference Service
+       │
+       ▼ (Key-Value lookup by diamond_id)
+Feast Online Store (SQLite / Redis)
+       │──> Pulls the latest materialized snapshot of all 9 features
+       ▼
+Model Execution: model.predict(latest_features)
+       │
+       ▼
+Instant Response: $2,945 (returned in <10ms)
+```
+
+---
+
+## 6. Summary of Business Impact
 
 | Metric / Dimension | Before Feast (Ad-hoc Joins) | With Feast Feature Store |
 | :--- | :--- | :--- |
